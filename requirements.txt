@@ -7,3 +7,6 @@ google-auth-oauthlib
 pytz
 aiohttp
 beautifulsoup4
+requests
+lxml
+openpyxl
