@@ -1,0 +1,9 @@
+playwright
+nest_asyncio
+pandas
+gspread
+google-auth
+google-auth-oauthlib
+pytz
+aiohttp
+beautifulsoup4
