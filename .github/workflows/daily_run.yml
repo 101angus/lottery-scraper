@@ -1,0 +1,59 @@
+# 這是這個自動化流程的名稱，隨便取，顯示在 Actions 分頁用的
+name: Daily Lottery Scraper
+
+# 這裡設定「什麼時候」要觸發這個流程
+on:
+  # 1. 定時排程
+  schedule:
+    # 這是 Cron 表達式。GitHub 使用的是【UTC 時間】(世界協調時間)。
+    # 台灣時間是 UTC+8。
+    # 如果你想在台灣時間早上 08:00 執行，就要減 8 小時 = UTC 00:00。
+    # 格式為：'分 時 日 月 週'
+    - cron: '0 1 * * *' 
+
+  # 2. 手動觸發按鈕
+  # 加了這行，你可以在 Actions 頁面看到一個 "Run workflow" 按鈕
+  # 讓你隨時可以測試，不用傻傻等時間到
+  workflow_dispatch:
+
+# 這裡設定要執行的「工作內容」
+jobs:
+  build:
+    # 指定要用哪種虛擬主機。ubuntu-latest 是最常用的 Linux 環境
+    runs-on: ubuntu-latest
+
+    # 步驟清單 (食譜開始)
+    steps:
+      # 步驟 1: 把你的程式碼從 GitHub 倉庫下載到虛擬主機上
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 步驟 2: 設定 Python 環境，版本選 3.9 (穩定)
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # 步驟 3: 安裝 Python 套件
+      # 這會讀取你在 requirements.txt 裡列出的清單 (pandas, gspread...)
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 步驟 4: 安裝 Playwright 瀏覽器核心 (最關鍵的一步！)
+      # 這一步是 Colab 轉移到這裡成功的關鍵
+      # install chromium: 下載瀏覽器
+      # install-deps: 自動安裝 Linux 缺少的系統底層檔案 (原本你在 Colab 用 apt-get 做的事)
+      - name: Install Playwright Browsers
+        run: |
+          playwright install chromium
+          playwright install-deps
+
+      # 步驟 5: 執行你的 Python 爬蟲程式
+      # env: 這裡是將我們在 Settings 裡設定的 Secret 金鑰注入到環境變數中
+      # 這樣你的 Python 程式裡的 os.environ.get('GCP_SA_KEY') 才抓得到東西
+      - name: Run Scraper
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python scraper.py
