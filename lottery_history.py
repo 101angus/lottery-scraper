@@ -178,7 +178,54 @@ async def fetch_all_games_async(existing_db):
             
     return final_results
 
-def save_to_gsheet(new_data_map):
+# ==============================================================================
+# 🕸️ 首頁爬蟲 (抓取頭獎上看金額)
+# ==============================================================================
+def fetch_homepage_estimates():
+    print("🕸️ 正在抓取官網首頁頭獎預估值...")
+    url = "https://www.taiwanlottery.com.tw/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    estimates = {}
+    try:
+        import requests
+        import re
+        import urllib3
+        urllib3.disable_warnings()
+        
+        resp = requests.get(url, headers=headers, verify=False, timeout=15)
+        if resp.status_code == 200:
+            html = resp.text
+            # Regex 尋找 "大樂透 ... 頭獎上看 ... 1.1 億" 的結構
+            # 由於 HTML 結構可能多變，我們尋找比較寬鬆的匹配
+            # 威力彩
+            # 尋找 "威力彩" 後面的 "頭獎" ... "上看" ... 數字
+            # 注意：HTML 可能包含換行 \n 或標籤
+            
+            # 建立一個通用的清理與搜尋函數
+            clean_html = re.sub(r'<[^>]+>', '', html).replace('\n', '').replace('\r', '').replace(' ', '')
+            
+            #搜尋 威力彩...頭獎上看...X.X億
+            m_super = re.search(r'威力彩.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
+            if m_super:
+                num_str = m_super.group(1)
+                estimates["威力彩"] = str(int(float(num_str) * 100000000))
+                print(f"   -> 威力彩頭獎上看: {num_str} 億 ({estimates['威力彩']})")
+                
+            #搜尋 大樂透...頭獎上看...X.X億
+            m_649 = re.search(r'大樂透.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
+            if m_649:
+                num_str = m_649.group(1)
+                estimates["大樂透"] = str(int(float(num_str) * 100000000))
+                print(f"   -> 大樂透頭獎上看: {num_str} 億 ({estimates['大樂透']})")
+                
+    except Exception as e:
+        print(f"⚠️ 首頁抓取失敗: {e}")
+        
+    return estimates
+
+def save_to_gsheet(new_data_map, estimates={}):
     summary_report = []
     
     creds = get_credentials()
@@ -189,7 +236,6 @@ def save_to_gsheet(new_data_map):
     except: 
         print(f"⚠️ 找不到試算表，正在建立新檔案: {SPREADSHEET_NAME}")
         sh = gc.create(SPREADSHEET_NAME)
-        # 請記得這裡如果要分享，需手動設定或在第一次執行後去 Drive 設定
         try: sh.share("101angus@gmail.com", perm_type='user', role='writer')
         except: pass
 
@@ -198,42 +244,54 @@ def save_to_gsheet(new_data_map):
     for game_name in all_games:
         new_df = new_data_map.get(game_name)
         
-        if new_df is not None and not new_df.empty:
+        # 即使沒有新資料(new_df empty)，只要有 estimates，我們也可能需要更新最新那一筆的頭獎金額
+        # 所以我們必須讀取舊資料來檢查
+        
+        try:
             try:
-                try:
-                    ws = sh.worksheet(game_name)
-                    old_data = ws.get_all_records()
-                    old_df = pd.DataFrame(old_data)
-                    if not old_df.empty:
-                        old_df['期別'] = old_df['期別'].astype(str)
-                except:
-                    ws = sh.add_worksheet(game_name, 100, 20)
-                    old_df = pd.DataFrame()
-                
+                ws = sh.worksheet(game_name)
+                old_data = ws.get_all_records()
+                old_df = pd.DataFrame(old_data)
+                if not old_df.empty:
+                    old_df['期別'] = old_df['期別'].astype(str)
+            except:
+                ws = sh.add_worksheet(game_name, 100, 20)
+                old_df = pd.DataFrame()
+            
+            final_df = old_df
+            if new_df is not None and not new_df.empty:
                 # 合併新舊資料
                 final_df = pd.concat([old_df, new_df], ignore_index=True)
+            
+            if not final_df.empty and "期別" in final_df.columns:
+                final_df['期別'] = final_df['期別'].astype(str)
+                # 依期別降序排列 (最新的在上面)
+                final_df = final_df.sort_values("期別", ascending=False)
+                # 去除重複
+                final_df = final_df.drop_duplicates(subset=['期別'], keep='first')
                 
-                if "期別" in final_df.columns:
-                    final_df['期別'] = final_df['期別'].astype(str)
-                    # 依期別降序排列 (最新的在上面)
-                    final_df = final_df.sort_values("期別", ascending=False)
-                    # 再次去除可能重複的期別
-                    final_df = final_df.drop_duplicates(subset=['期別'], keep='first')
+                # [Important] 注入頭獎上看金額到最新一期
+                if game_name in estimates:
+                    # 更新第一列 (Loc 0 or depends on index, reset index first)
+                    final_df = final_df.reset_index(drop=True)
+                    # 覆蓋 "本期總獎金 (含累積)"
+                    final_df.loc[0, "本期總獎金 (含累積)"] = estimates[game_name]
+                    summary_report.append(f"[{game_name}] 更新頭獎預估值: {estimates[game_name]}")
+            
+            # 欄位排序
+            desired_order = ["期別", "開獎日期", "號碼1", "號碼2", "號碼3", "號碼4", "號碼5", "號碼6", "特別號/第二區", "銷售金額", "本期總獎金 (含累積)"]
+            final_cols = [c for c in desired_order if c in final_df.columns]
+            final_cols += [c for c in final_df.columns if c not in final_cols]
+            final_df = final_df.reindex(columns=final_cols).fillna("")
+            
+            ws.clear()
+            ws.update([final_df.columns.values.tolist()] + final_df.values.tolist(), value_input_option='USER_ENTERED')
+            
+            if new_df is not None and not new_df.empty:
+                summary_report.append(f"[{game_name}] 寫入 {len(new_df)} 筆新資料")
                 
-                # 欄位排序
-                desired_order = ["期別", "開獎日期", "號碼1", "號碼2", "號碼3", "號碼4", "號碼5", "號碼6", "特別號/第二區", "銷售金額", "本期總獎金 (含累積)"]
-                final_cols = [c for c in desired_order if c in final_df.columns]
-                final_cols += [c for c in final_df.columns if c not in final_cols]
-                final_df = final_df.reindex(columns=final_cols).fillna("")
-                
-                ws.clear()
-                ws.update([final_df.columns.values.tolist()] + final_df.values.tolist(), value_input_option='USER_ENTERED')
-                
-                summary_report.append(f"[{game_name}] 更新/新增 {len(new_df)} 筆")
-            except Exception as e:
-                summary_report.append(f"[{game_name}] 寫入失敗: {e}")
-        else:
-            summary_report.append(f"[{game_name}] 無新資料")
+        except Exception as e:
+            summary_report.append(f"[{game_name}] 處理失敗: {e}")
 
     print("-" * 30)
     for line in summary_report:
@@ -246,9 +304,16 @@ def save_to_gsheet(new_data_map):
 # ==============================================================================
 async def main():
     print("🚀 開始執行歷史數據爬蟲...")
+    
+    # 1. 抓取首頁預估值
+    estimates = fetch_homepage_estimates()
+    
+    # 2. 抓取歷史資料
     latest_status = get_latest_periods_fast()
     new_res = await fetch_all_games_async(latest_status)
-    save_to_gsheet(new_res)
+    
+    # 3. 儲存並更新預估值
+    save_to_gsheet(new_res, estimates)
     print("✅ 執行完畢")
 
 if __name__ == "__main__":
