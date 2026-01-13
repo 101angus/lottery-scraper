@@ -179,56 +179,60 @@ async def fetch_all_games_async(existing_db):
     return final_results
 
 # ==============================================================================
-# 🕸️ 首頁爬蟲 (抓取頭獎上看金額) + API備援
+# 🕸️ 抓取頭獎預估值 (行銷數字 API)
 # ==============================================================================
 def fetch_homepage_estimates():
-    print("🕸️ 正在抓取官網首頁頭獎預估值...")
+    print("🕸️ 正在抓取官網【頭獎上看】行銷數字...")
     estimates = {}
     
     import requests
-    import re
     import urllib3
     urllib3.disable_warnings()
     
     # ----------------------------------------------------------------------
-    # 1. 嘗試抓取首頁 HTML (優先)
+    # 1. 嘗試抓取 'uptoPrize' API (行銷預估值)
+    #    回傳範例: [{'gameCode': 5118, 'prize': '1.1', ...}, {'gameCode': 5134, 'prize': '5.2', ...}]
+    #    5118 = 大樂透, 5134 = 威力彩
     # ----------------------------------------------------------------------
     try:
-        url = "https://www.taiwanlottery.com.tw/"
+        url = "https://api.taiwanlottery.com/TLCAPIWeB/Lottery/uptoPrize"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        # 增加 timeout 到 30 秒，並使用 Session
-        session = requests.Session()
-        resp = session.get(url, headers=headers, verify=False, timeout=30)
+        resp = requests.get(url, headers=headers, verify=False, timeout=15)
         
         if resp.status_code == 200:
-            html = resp.text
-            clean_html = re.sub(r'<[^>]+>', '', html).replace('\n', '').replace('\r', '').replace(' ', '')
+            data = resp.json()
+            items = data.get('content', {}).get('uptoPrizeList', [])
             
-            # 搜尋 威力彩...頭獎上看...X.X億
-            m_super = re.search(r'威力彩.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
-            if m_super:
-                val = str(int(float(m_super.group(1)) * 100000000))
-                estimates["威力彩"] = val
-                print(f"   -> [首頁] 威力彩: {m_super.group(1)} 億")
+            for item in items:
+                code = str(item.get('gameCode'))
+                prize_str = str(item.get('prize', '0'))
                 
-            # 搜尋 大樂透...頭獎上看...X.X億
-            m_649 = re.search(r'大樂透.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
-            if m_649:
-                val = str(int(float(m_649.group(1)) * 100000000))
-                estimates["大樂透"] = val
-                print(f"   -> [首頁] 大樂透: {m_649.group(1)} 億")
+                try:
+                    # 轉換邏輯: "1.1" (億) -> 110000000
+                    val = int(float(prize_str) * 100000000)
+                    val_str = str(val)
+                except:
+                    val_str = "0"
+
+                if code == "5134":
+                    estimates["威力彩"] = val_str
+                    print(f"   -> [API-上看] 威力彩: {prize_str} 億 ({val_str})")
+                elif code == "5118":
+                    estimates["大樂透"] = val_str
+                    print(f"   -> [API-上看] 大樂透: {prize_str} 億 ({val_str})")
                 
     except Exception as e:
-        print(f"⚠️ 首頁抓取失敗 (將嘗試 API): {e}")
+        print(f"⚠️ 行銷數字 API 抓取失敗: {e}")
 
     # ----------------------------------------------------------------------
-    # 2. 嘗試抓取 Jackpot API (備援)
+    # 2. 備援机制: Jackpot API (實際累積值)
+    #    如果上面的 'uptoPrize' 沒抓到，改用 'Jackpot' 補救
     # ----------------------------------------------------------------------
     if "威力彩" not in estimates or "大樂透" not in estimates:
         try:
-            print("   -> 正在切換至 API 備援模式...")
+            print("   -> 部分資料缺失，啟動 [API-實際累積] 備援模式...")
             api_url = "https://api.taiwanlottery.com/TLCAPIWeB/Lottery/Jackpot"
             resp = requests.get(api_url, verify=False, timeout=10)
             if resp.status_code == 200:
@@ -238,13 +242,12 @@ def fetch_homepage_estimates():
                     code = str(item.get('gameCode'))
                     amt = str(int(item.get('jackpot', 0))) # API 給的是整數
                     
-                    # 5134=威力彩, 5118=大樂透 (推測)
                     if code == "5134" and "威力彩" not in estimates:
                         estimates["威力彩"] = amt
-                        print(f"   -> [API] 威力彩: {amt}")
+                        print(f"   -> [API-備援] 威力彩: {amt}")
                     elif code == "5118" and "大樂透" not in estimates:
                         estimates["大樂透"] = amt
-                        print(f"   -> [API] 大樂透: {amt}")
+                        print(f"   -> [API-備援] 大樂透: {amt}")
         except Exception as e:
             print(f"⚠️ API 備援失敗: {e}")
 
@@ -334,7 +337,7 @@ async def main():
     estimates = fetch_homepage_estimates()
     
 async def main():
-    print("🚀 開始執行歷史數據爬蟲...")
+    print(">>> 開始執行歷史數據爬蟲...")
     
     # 1. 抓取首頁預估值
     estimates = fetch_homepage_estimates()
@@ -344,19 +347,28 @@ async def main():
     
     if has_creds:
         # 2. 抓取歷史資料 (需連線 Google Sheets)
-        latest_status = get_latest_periods_fast()
-        new_res = await fetch_all_games_async(latest_status)
-        
-        # 3. 儲存並更新預估值
-        save_to_gsheet(new_res, estimates)
+        try:
+            latest_status = get_latest_periods_fast()
+            new_res = await fetch_all_games_async(latest_status)
+            
+            # 3. 儲存並更新預估值
+            save_to_gsheet(new_res, estimates)
+        except Exception as e:
+            print(f"[ERROR] 歷史資料抓取失敗: {e}")
     else:
-        print("\n[⚠️ 本地測試模式] 未偵測到 GCP_SA_KEY")
-        print(f"📊 抓取到的頭獎預估值 (將寫入第12欄):")
+        print("\n[注意: 本地測試模式] 未偵測到 GCP_SA_KEY")
+        print(f"抓取到的頭獎預估值 (將寫入第12欄):")
         print(json.dumps(estimates, indent=4, ensure_ascii=False))
         print("----------")
-        print("⏩ 因無金鑰，已跳過歷史資料抓取與寫入測試。")
+        print(">>> 因無金鑰，已跳過歷史資料抓取與寫入測試。")
     
-    print("✅ 執行完畢")
+    print(">>> 執行完畢")
 
 if __name__ == "__main__":
+    # Fix for Windows console encoding
+    import sys
+    if sys.platform.startswith('win'):
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    
     asyncio.run(main())
