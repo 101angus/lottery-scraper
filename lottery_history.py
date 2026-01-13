@@ -179,50 +179,75 @@ async def fetch_all_games_async(existing_db):
     return final_results
 
 # ==============================================================================
-# 🕸️ 首頁爬蟲 (抓取頭獎上看金額)
+# 🕸️ 首頁爬蟲 (抓取頭獎上看金額) + API備援
 # ==============================================================================
 def fetch_homepage_estimates():
     print("🕸️ 正在抓取官網首頁頭獎預估值...")
-    url = "https://www.taiwanlottery.com.tw/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
     estimates = {}
+    
+    import requests
+    import re
+    import urllib3
+    urllib3.disable_warnings()
+    
+    # ----------------------------------------------------------------------
+    # 1. 嘗試抓取首頁 HTML (優先)
+    # ----------------------------------------------------------------------
     try:
-        import requests
-        import re
-        import urllib3
-        urllib3.disable_warnings()
+        url = "https://www.taiwanlottery.com.tw/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        # 增加 timeout 到 30 秒，並使用 Session
+        session = requests.Session()
+        resp = session.get(url, headers=headers, verify=False, timeout=30)
         
-        resp = requests.get(url, headers=headers, verify=False, timeout=15)
         if resp.status_code == 200:
             html = resp.text
-            # Regex 尋找 "大樂透 ... 頭獎上看 ... 1.1 億" 的結構
-            # 由於 HTML 結構可能多變，我們尋找比較寬鬆的匹配
-            # 威力彩
-            # 尋找 "威力彩" 後面的 "頭獎" ... "上看" ... 數字
-            # 注意：HTML 可能包含換行 \n 或標籤
-            
-            # 建立一個通用的清理與搜尋函數
             clean_html = re.sub(r'<[^>]+>', '', html).replace('\n', '').replace('\r', '').replace(' ', '')
             
-            #搜尋 威力彩...頭獎上看...X.X億
+            # 搜尋 威力彩...頭獎上看...X.X億
             m_super = re.search(r'威力彩.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
             if m_super:
-                num_str = m_super.group(1)
-                estimates["威力彩"] = str(int(float(num_str) * 100000000))
-                print(f"   -> 威力彩頭獎上看: {num_str} 億 ({estimates['威力彩']})")
+                val = str(int(float(m_super.group(1)) * 100000000))
+                estimates["威力彩"] = val
+                print(f"   -> [首頁] 威力彩: {m_super.group(1)} 億")
                 
-            #搜尋 大樂透...頭獎上看...X.X億
+            # 搜尋 大樂透...頭獎上看...X.X億
             m_649 = re.search(r'大樂透.*?頭獎.*?上看.*?(\d+\.?\d*)億', clean_html)
             if m_649:
-                num_str = m_649.group(1)
-                estimates["大樂透"] = str(int(float(num_str) * 100000000))
-                print(f"   -> 大樂透頭獎上看: {num_str} 億 ({estimates['大樂透']})")
+                val = str(int(float(m_649.group(1)) * 100000000))
+                estimates["大樂透"] = val
+                print(f"   -> [首頁] 大樂透: {m_649.group(1)} 億")
                 
     except Exception as e:
-        print(f"⚠️ 首頁抓取失敗: {e}")
-        
+        print(f"⚠️ 首頁抓取失敗 (將嘗試 API): {e}")
+
+    # ----------------------------------------------------------------------
+    # 2. 嘗試抓取 Jackpot API (備援)
+    # ----------------------------------------------------------------------
+    if "威力彩" not in estimates or "大樂透" not in estimates:
+        try:
+            print("   -> 正在切換至 API 備援模式...")
+            api_url = "https://api.taiwanlottery.com/TLCAPIWeB/Lottery/Jackpot"
+            resp = requests.get(api_url, verify=False, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                jlist = data.get('content', {}).get('jackpotList', [])
+                for item in jlist:
+                    code = str(item.get('gameCode'))
+                    amt = str(int(item.get('jackpot', 0))) # API 給的是整數
+                    
+                    # 5134=威力彩, 5118=大樂透 (推測)
+                    if code == "5134" and "威力彩" not in estimates:
+                        estimates["威力彩"] = amt
+                        print(f"   -> [API] 威力彩: {amt}")
+                    elif code == "5118" and "大樂透" not in estimates:
+                        estimates["大樂透"] = amt
+                        print(f"   -> [API] 大樂透: {amt}")
+        except Exception as e:
+            print(f"⚠️ API 備援失敗: {e}")
+
     return estimates
 
 def save_to_gsheet(new_data_map, estimates={}):
@@ -231,7 +256,6 @@ def save_to_gsheet(new_data_map, estimates={}):
     creds = get_credentials()
     gc = gspread.authorize(creds)
     
-    # 開啟或建立
     try: sh = gc.open(SPREADSHEET_NAME)
     except: 
         print(f"⚠️ 找不到試算表，正在建立新檔案: {SPREADSHEET_NAME}")
@@ -243,9 +267,6 @@ def save_to_gsheet(new_data_map, estimates={}):
     
     for game_name in all_games:
         new_df = new_data_map.get(game_name)
-        
-        # 即使沒有新資料(new_df empty)，只要有 estimates，我們也可能需要更新最新那一筆的頭獎金額
-        # 所以我們必須讀取舊資料來檢查
         
         try:
             try:
@@ -260,30 +281,34 @@ def save_to_gsheet(new_data_map, estimates={}):
             
             final_df = old_df
             if new_df is not None and not new_df.empty:
-                # 合併新舊資料
                 final_df = pd.concat([old_df, new_df], ignore_index=True)
             
-            if not final_df.empty and "期別" in final_df.columns:
-                final_df['期別'] = final_df['期別'].astype(str)
-                # 依期別降序排列 (最新的在上面)
-                final_df = final_df.sort_values("期別", ascending=False)
-                # 去除重複
-                final_df = final_df.drop_duplicates(subset=['期別'], keep='first')
+            if not final_df.empty:
+                if "期別" in final_df.columns:
+                    final_df['期別'] = final_df['期別'].astype(str)
+                    final_df = final_df.sort_values("期別", ascending=False)
+                    final_df = final_df.drop_duplicates(subset=['期別'], keep='first')
                 
-                # [Important] 注入頭獎上看金額到最新一期
+                # [Fix] 絕對確保 "頭獎上看" 欄位存在
+                if "頭獎上看" not in final_df.columns:
+                    final_df["頭獎上看"] = ""
+                    final_df["頭獎上看"] = final_df["頭獎上看"].fillna("")
+
+                # 注入頭獎上看金額
                 if game_name in estimates:
-                    # 更新第一列 (Loc 0 or depends on index, reset index first)
                     final_df = final_df.reset_index(drop=True)
-                    # 覆蓋 "本期總獎金 (含累積)"
-                    final_df.loc[0, "本期總獎金 (含累積)"] = estimates[game_name]
-                    summary_report.append(f"[{game_name}] 更新頭獎預估值: {estimates[game_name]}")
+                    final_df.loc[0, "頭獎上看"] = estimates[game_name]
+                    summary_report.append(f"[{game_name}] 更新頭獎預估: {estimates[game_name]}")
             
-            # 欄位排序
-            desired_order = ["期別", "開獎日期", "號碼1", "號碼2", "號碼3", "號碼4", "號碼5", "號碼6", "特別號/第二區", "銷售金額", "本期總獎金 (含累積)"]
+            # 欄位排序 ("頭獎上看" 排在最後)
+            desired_order = ["期別", "開獎日期", "號碼1", "號碼2", "號碼3", "號碼4", "號碼5", "號碼6", "特別號/第二區", "銷售金額", "本期總獎金 (含累積)", "頭獎上看"]
             final_cols = [c for c in desired_order if c in final_df.columns]
             final_cols += [c for c in final_df.columns if c not in final_cols]
             final_df = final_df.reindex(columns=final_cols).fillna("")
             
+            # 強制轉型 string
+            final_df = final_df.astype(str)
+
             ws.clear()
             ws.update([final_df.columns.values.tolist()] + final_df.values.tolist(), value_input_option='USER_ENTERED')
             
@@ -308,12 +333,29 @@ async def main():
     # 1. 抓取首頁預估值
     estimates = fetch_homepage_estimates()
     
-    # 2. 抓取歷史資料
-    latest_status = get_latest_periods_fast()
-    new_res = await fetch_all_games_async(latest_status)
+async def main():
+    print("🚀 開始執行歷史數據爬蟲...")
     
-    # 3. 儲存並更新預估值
-    save_to_gsheet(new_res, estimates)
+    # 1. 抓取首頁預估值
+    estimates = fetch_homepage_estimates()
+    
+    # Check Env var once
+    has_creds = os.environ.get('GCP_SA_KEY') is not None
+    
+    if has_creds:
+        # 2. 抓取歷史資料 (需連線 Google Sheets)
+        latest_status = get_latest_periods_fast()
+        new_res = await fetch_all_games_async(latest_status)
+        
+        # 3. 儲存並更新預估值
+        save_to_gsheet(new_res, estimates)
+    else:
+        print("\n[⚠️ 本地測試模式] 未偵測到 GCP_SA_KEY")
+        print(f"📊 抓取到的頭獎預估值 (將寫入第12欄):")
+        print(json.dumps(estimates, indent=4, ensure_ascii=False))
+        print("----------")
+        print("⏩ 因無金鑰，已跳過歷史資料抓取與寫入測試。")
+    
     print("✅ 執行完畢")
 
 if __name__ == "__main__":
