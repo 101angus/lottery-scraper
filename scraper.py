@@ -72,11 +72,20 @@ async def fetch_prize_via_api_async(session, news_url, target_game_id):
             final_parts = []
 
             # 1. 定位起點 (ID 錨點)
-            anchor = soup.find("a", attrs={"id": target_game_id}) or soup.find("a", attrs={"name": target_game_id})
-            target_tables = []
+            anchor = soup.find("a", attrs={"id": str(target_game_id)}) or soup.find("a", attrs={"name": str(target_game_id)})
             
+            # 針對新版網頁，若無傳統錨點，尋找包含「期數」與目標 ID 的標題
+            if not anchor:
+                for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'div', 'p', 'span']):
+                    txt = tag.get_text(strip=True)
+                    # 避免抓到外層容器，限制字數長度
+                    if "期數" in txt and str(target_game_id) in txt and len(txt) < 50:
+                        anchor = tag
+                        break
+
+            target_tables = []
             if anchor:
-                # 從錨點開始，無限制往後找所有表格，直到遇到下一個錨點
+                # 從錨點開始，往後找所有表格，直到遇到下一個錨點或下一個遊戲
                 curr = anchor
                 while True:
                     curr = curr.find_next()
@@ -85,11 +94,21 @@ async def fetch_prize_via_api_async(session, news_url, target_game_id):
                     if curr.name == "table":
                         target_tables.append(curr)
                     
-                    # 停止條件：遇到下一個 ID 錨點 (且不是自己)
+                    # 停止條件：遇到下一個 ID 錨點或另一個遊戲的標題
+                    stop_parsing = False
                     if curr.name == "a" and (curr.get("id") or curr.get("name")):
-                        aid = curr.get("id") or curr.get("name")
-                        if str(aid) != str(target_game_id) and re.match(r'^\d+$', str(aid)):
-                            break
+                        aid = str(curr.get("id") or curr.get("name")).strip()
+                        if aid != str(target_game_id) and re.match(r'^\d{3,4}$', aid):
+                            stop_parsing = True
+                    elif curr.name in ["h1", "h2", "h3", "h4"]:
+                        txt = curr.get_text(strip=True)
+                        if "期數" in txt and len(txt) < 50:
+                            m = re.search(r'\d{3,4}', txt)
+                            if m and m.group() != str(target_game_id):
+                                stop_parsing = True
+                    
+                    if stop_parsing:
+                        break
             else:
                 # 備案：單一遊戲頁面，抓所有表格
                 target_tables = soup.find_all("table")
