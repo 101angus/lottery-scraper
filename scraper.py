@@ -255,7 +255,7 @@ async def scrape_all_scratchcards():
                         row = {
                             "編號": lottery_id,
                             "名稱": game_name,
-                            "售價": details.get("售價", "-").replace("$", ""),
+                            "售價": details.get("售價", "-").replace("$", "").replace(",", ""),
                             "最高獎金": details.get("最高獎金", "-"),
                             "發行日": details.get("發行日", "-"),
                             "下市日": details.get("下市日", "-"),
