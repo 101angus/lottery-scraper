@@ -32,7 +32,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       # 步驟 3: 安裝 Python 套件
       # 這會讀取你在 requirements.txt 裡列出的清單 (pandas, gspread...)
